@@ -321,6 +321,46 @@ impl TyphoonApp {
         }
     }
 
+    /// Switch theme. Overload brings its own alert sounds; leaving it puts
+    /// back the ones picked before.
+    fn change_theme(&mut self, ctx: &egui::Context, from: ThemeChoice, to: ThemeChoice) {
+        theme::set_choice(ctx, to);
+        let s = &mut self.settings;
+        if to == ThemeChoice::Overload && from != ThemeChoice::Overload {
+            s.sounds_before_overload = Some(s.alert_sounds);
+            s.alert_sounds = Preset::Overload.sounds();
+        } else if from == ThemeChoice::Overload
+            && to != ThemeChoice::Overload
+            && let Some(previous) = s.sounds_before_overload.take()
+        {
+            s.alert_sounds = previous;
+        }
+    }
+
+    /// Overload theme: a pop for each button, tab, checkbox or dropdown
+    /// clicked this frame (egui reports every click, for screen readers).
+    fn click_pop(&self, ctx: &egui::Context) {
+        let s = &self.settings;
+        if s.theme != ThemeChoice::Overload || !s.sound_on || !s.click_sounds {
+            return;
+        }
+        let clicked = ctx.output(|o| {
+            o.events.iter().any(|e| {
+                matches!(e, egui::output::OutputEvent::Clicked(info) if matches!(
+                    info.role,
+                    egui::Role::Button
+                        | egui::Role::CheckBox
+                        | egui::Role::RadioButton
+                        | egui::Role::ComboBox
+                        | egui::Role::DisclosureTriangle
+                ))
+            })
+        });
+        if clicked {
+            sound::play_click(s.sound_volume);
+        }
+    }
+
     fn on_job_event(&mut self, event: JobEvent) {
         match event {
             JobEvent::Started { total } => {
@@ -692,7 +732,9 @@ impl TyphoonApp {
             .auto_sized()
             .vscroll(true)
             .min_width(340.0)
-            .max_width(400.0)
+            // Overload's wider pixel font and solid scroll bar need more room
+            // to keep all four themes on one row.
+            .max_width(if theme::pal(ctx).retro { 490.0 } else { 400.0 })
             // Relative to the constrain rect, which already starts below the bar.
             .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-12.0, 0.0))
             .max_height((screen.bottom() - top - 12.0).max(120.0))
@@ -701,15 +743,31 @@ impl TyphoonApp {
                 ui.label(RichText::new("Appearance").strong());
                 ui.horizontal_wrapped(|ui| {
                     ui.label("Theme");
-                    for choice in [ThemeChoice::System, ThemeChoice::Light, ThemeChoice::Dark] {
+                    let before = self.settings.theme;
+                    let choices = [
+                        ThemeChoice::System,
+                        ThemeChoice::Light,
+                        ThemeChoice::Dark,
+                        ThemeChoice::Overload,
+                    ];
+                    for choice in choices {
                         if ui
                             .selectable_value(&mut self.settings.theme, choice, choice.label())
                             .changed()
                         {
-                            theme::set_choice(ctx, choice);
+                            self.change_theme(ctx, before, choice);
                         }
                     }
                 });
+                if self.settings.theme == ThemeChoice::Overload {
+                    ui.label(
+                        RichText::new(
+                            "Overload brings its own alert sounds; switching theme puts yours back.",
+                        )
+                        .small()
+                        .color(theme::pal(ctx).text_dim),
+                    );
+                }
                 ui.horizontal(|ui| {
                     ui.label("UI scale");
                     let mut zoom = ctx.zoom_factor();
@@ -730,13 +788,18 @@ impl TyphoonApp {
                         .small()
                         .color(theme::pal(ctx).text_dim),
                 );
-                ui.horizontal(|ui| {
-                    ui.label("Logo opacity");
-                    ui.add(
-                        egui::Slider::new(&mut self.settings.logo_opacity, 0.0..=0.3)
-                            .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)),
-                    );
-                });
+                // Overload's tiled background has no logo.
+                ui.add_enabled_ui(!theme::pal(ctx).retro, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Logo opacity");
+                        ui.add(
+                            egui::Slider::new(&mut self.settings.logo_opacity, 0.0..=0.3)
+                                .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)),
+                        );
+                    })
+                })
+                .response
+                .on_disabled_hover_text("The Overload theme shows no logo");
 
                 ui.separator();
                 ui.label(RichText::new("Sound").strong());
@@ -792,15 +855,18 @@ impl TyphoonApp {
                                 .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)),
                         );
                     });
+                    if self.settings.theme == ThemeChoice::Overload {
+                        ui.checkbox(&mut self.settings.click_sounds, "Pop on every click");
+                    }
                 });
-                ui.label(
-                    RichText::new(
-                        "Sounds play only for errors, alerts (job paused, board not answering), \
-                         homing done and wind done.",
-                    )
-                    .small()
-                    .color(theme::pal(ctx).text_dim),
-                );
+                let note = if self.settings.theme == ThemeChoice::Overload {
+                    "Sounds play for errors, alerts (job paused, board not answering), homing \
+                     done and wind done, plus a pop on each click if that's on."
+                } else {
+                    "Sounds play only for errors, alerts (job paused, board not answering), \
+                     homing done and wind done."
+                };
+                ui.label(RichText::new(note).small().color(theme::pal(ctx).text_dim));
 
                 ui.separator();
                 ui.label(RichText::new("Machine").strong());
@@ -896,7 +962,7 @@ impl TyphoonApp {
             ui.columns(3, |cols| {
                 for (ui, (axis, name, unit, value)) in cols.iter_mut().zip(axes) {
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new(axis).strong().size(16.0).color(theme::RED));
+                        ui.label(RichText::new(axis).strong().size(16.0).color(p.accent));
                         ui.add(
                             egui::Label::new(RichText::new(name).small().color(p.text_dim))
                                 .extend(),
@@ -1130,12 +1196,14 @@ impl TyphoonApp {
             });
 
             let (fraction, text) = self.progress_text();
-            let fill = if active || fraction > 0.0 { theme::RED } else { Color32::TRANSPARENT };
+            let fill = if active || fraction > 0.0 { p.accent_fill } else { Color32::TRANSPARENT };
             ui.add(
                 ProgressBar::new(fraction as f32)
                     .desired_height(20.0)
-                    // Readable on both the red fill and the empty track.
-                    .text(RichText::new(text).color(if p.dark { Color32::WHITE } else { theme::GREY }))
+                    // A pill (half the height), or square in Overload.
+                    .corner_radius(p.corner(10))
+                    // Readable on both the accent fill and the empty track.
+                    .text(RichText::new(text).color(if p.dark { Color32::WHITE } else { p.text }))
                     .fill(fill),
             );
 
@@ -1168,8 +1236,8 @@ impl TyphoonApp {
                         } else {
                             None
                         };
-                        let start = Button::new(RichText::new("▶ Start").strong().color(Color32::WHITE))
-                            .fill(theme::RED);
+                        let start = Button::new(RichText::new("▶ Start").strong().color(p.on_accent))
+                            .fill(p.accent_fill);
                         if ui
                             .add_enabled(blocked.is_none(), start)
                             .on_hover_text("Check the setup, then stream the G-code to the winder")
@@ -1361,8 +1429,8 @@ impl TyphoonApp {
                     );
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
-                        let go = Button::new(RichText::new("Start winding").strong().color(Color32::WHITE))
-                            .fill(theme::RED);
+                        let go = Button::new(RichText::new("Start winding").strong().color(p.on_accent))
+                            .fill(p.accent_fill);
                         if ui.add(go).clicked() {
                             self.start_job();
                             close = true;
@@ -1473,7 +1541,7 @@ impl TyphoonApp {
                 (ui.available_height() - input_row - log_frame_margin - spacing * 2.0).max(24.0);
             Frame::NONE
                 .fill(p.well)
-                .corner_radius(4)
+                .corner_radius(p.corner(4))
                 .inner_margin(Margin::same(6))
                 .show(ui, |ui| {
                     let hide_quiet = self.settings.console_hide_ok;
@@ -1563,11 +1631,13 @@ impl TyphoonApp {
 }
 
 /// A tab: always drawn as an outlined box so it reads as clickable; the
-/// selected one is filled red.
+/// selected one is filled with the accent colour.
 fn tab_button(ui: &mut Ui, selected: bool, label: &str) -> egui::Response {
     let p = theme::pal(ui.ctx());
     let (text, fill, stroke) = if selected {
-        (RichText::new(label).strong().color(Color32::WHITE), theme::RED, theme::RED)
+        // Overload outlines it in purple like its other buttons.
+        let outline = if p.retro { p.card_stroke } else { p.accent_fill };
+        (RichText::new(label).strong().color(p.on_accent), p.accent_fill, outline)
     } else {
         (RichText::new(label), p.inset, p.text_dim.gamma_multiply(0.6))
     };
@@ -1575,7 +1645,7 @@ fn tab_button(ui: &mut Ui, selected: bool, label: &str) -> egui::Response {
         Button::new(text)
             .fill(fill)
             .stroke(egui::Stroke::new(1.0, stroke))
-            .corner_radius(6)
+            .corner_radius(p.corner(6))
             .min_size(egui::vec2(96.0, 30.0)),
     )
 }
@@ -1593,7 +1663,7 @@ fn jog_row(
 ) -> Option<f32> {
     let mut clicked = None;
     ui.horizontal(|ui| {
-        ui.label(RichText::new(axis).strong().color(theme::RED));
+        ui.label(RichText::new(axis).strong().color(theme::pal(ui.ctx()).accent));
         let step = steps[*selected];
         for (sign, factor) in [("−", -1.0), ("+", 1.0)] {
             if ui
@@ -1650,13 +1720,8 @@ impl eframe::App for TyphoonApp {
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let p = theme::pal(ui.ctx());
-        self.background.paint(
-            ui.painter(),
-            ui.max_rect(),
-            p.background,
-            p.dark,
-            self.settings.logo_opacity,
-        );
+        self.background
+            .paint(ui.painter(), ui.max_rect(), &p, self.settings.logo_opacity);
 
         let width = ui.available_width();
         let height = ui.available_height();
@@ -1668,6 +1733,10 @@ impl eframe::App for TyphoonApp {
             .resizable(false)
             .show(ui, |ui| self.top_bar(ui));
         self.top_bar_bottom = top.response.rect.bottom();
+        if p.retro {
+            // Raised, like a Windows 98 taskbar.
+            theme::bevel(ui.painter(), top.response.rect, true);
+        }
 
         let side = Frame::NONE.inner_margin(Margin::same(10));
         let narrow = width < NARROW_WIDTH;
@@ -1728,6 +1797,8 @@ impl eframe::App for TyphoonApp {
         }
         self.preferences_window(&ctx);
         self.dialogs(&ctx);
+        // Last, so it hears clicks from every panel, window and dialog above.
+        self.click_pop(&ctx);
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {

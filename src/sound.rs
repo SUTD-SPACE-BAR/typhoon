@@ -4,7 +4,12 @@
 //!
 //! Sounds only play for the important moments: errors, alerts that need the
 //! operator, homing complete and wind done. Each of those can use any sound
-//! from the library below; presets fill all four at once.
+//! from the library below; presets fill all four at once. In the Overload
+//! theme, clicks can also pop.
+//!
+//! The Overload sounds are chiptune bleeps rebuilt from measurements of
+//! short clips: the notes, pitch glides and stepped volume envelopes were
+//! read off their spectra every 5–10 ms and matched.
 //!
 //! The ALR-67 tones use the frequencies and timings documented for the real
 //! AN/ALR-67(V) audio by the VRS Superbug F/A-18 simulator wiki ("ALR-67 Audio
@@ -20,6 +25,10 @@ use serde::{Deserialize, Serialize};
 const RATE: u32 = 22_050;
 /// The same alert won't repeat faster than this.
 const MIN_REPEAT: Duration = Duration::from_millis(1500);
+/// Loudest sample at full volume, as a fraction of full scale.
+const PEAK: f32 = 0.8;
+/// Click pops play at this fraction of the alert volume.
+const CLICK_LEVEL: f32 = 0.6;
 
 /// The moments that can make a sound.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -75,11 +84,17 @@ pub enum Sound {
     BeepDouble,
     BeepSingle,
     BeepRise,
+    /// Overload theme clips (WAV files built into the app).
+    OverloadNade,
+    OverloadNadeLong,
+    OverloadPer,
+    OverloadPop,
+    OverloadTutorialPop,
     Silent,
 }
 
 impl Sound {
-    pub const ALL: [Sound; 19] = [
+    pub const ALL: [Sound; 24] = [
         Sound::RwrLaunch,
         Sound::RwrTrack,
         Sound::RwrStatus,
@@ -98,6 +113,11 @@ impl Sound {
         Sound::BeepDouble,
         Sound::BeepSingle,
         Sound::BeepRise,
+        Sound::OverloadNade,
+        Sound::OverloadNadeLong,
+        Sound::OverloadPer,
+        Sound::OverloadPop,
+        Sound::OverloadTutorialPop,
         Sound::Silent,
     ];
 
@@ -121,6 +141,11 @@ impl Sound {
             Sound::BeepDouble => "Beep · Double",
             Sound::BeepSingle => "Beep · Single",
             Sound::BeepRise => "Beep · Rising",
+            Sound::OverloadNade => "Overload · Nade-nade",
+            Sound::OverloadNadeLong => "Overload · Nade-nade (long)",
+            Sound::OverloadPer => "Overload · Per-per",
+            Sound::OverloadPop => "Overload · Pop",
+            Sound::OverloadTutorialPop => "Overload · Tutorial pop",
             Sound::Silent => "Silent",
         }
     }
@@ -174,10 +199,17 @@ pub enum Preset {
     BambuA1,
     Chimes,
     Beeps,
+    Overload,
 }
 
 impl Preset {
-    pub const ALL: [Preset; 4] = [Preset::Alr67, Preset::BambuA1, Preset::Chimes, Preset::Beeps];
+    pub const ALL: [Preset; 5] = [
+        Preset::Alr67,
+        Preset::BambuA1,
+        Preset::Chimes,
+        Preset::Beeps,
+        Preset::Overload,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -185,6 +217,7 @@ impl Preset {
             Preset::BambuA1 => "Bambu A1-style",
             Preset::Chimes => "Soft chimes",
             Preset::Beeps => "Simple beeps",
+            Preset::Overload => "Overload",
         }
     }
 
@@ -196,6 +229,13 @@ impl Preset {
             Preset::BambuA1 => (Sound::A1Error, Sound::A1Notice, Sound::A1Homed, Sound::A1Done),
             Preset::Chimes => (Sound::ChimeFall, Sound::ChimeDouble, Sound::ChimeBell, Sound::ChimeArpeggio),
             Preset::Beeps => (Sound::BeepTriple, Sound::BeepDouble, Sound::BeepSingle, Sound::BeepRise),
+            // The Overload clips; the short pop is kept for clicks.
+            Preset::Overload => (
+                Sound::OverloadPer,
+                Sound::OverloadTutorialPop,
+                Sound::OverloadNade,
+                Sound::OverloadNadeLong,
+            ),
         };
         AlertSounds {
             error,
@@ -228,7 +268,13 @@ pub fn play(sound: Sound, volume: f32) {
     if sound == Sound::Silent {
         return;
     }
-    play_wav(wav(&synthesize(sound, volume)));
+    play_wav(wav(&synthesize(sound, volume)), false);
+}
+
+/// The Overload theme's click: a quieter pop that gives way to any sound
+/// already playing, so it never cuts off an alert.
+pub fn play_click(volume: f32) {
+    play_wav(wav(&synthesize(Sound::OverloadPop, volume * CLICK_LEVEL)), true);
 }
 
 // ----------------------------------------------------------------- synthesis
@@ -341,11 +387,70 @@ impl Synth {
         }
         self
     }
+
+    /// A chiptune note: a band-limited square-ish wave whose pitch (Hz),
+    /// volume (0..=1) and brightness come from `shape(t)`, t in seconds from
+    /// the note's start. Brightness 1 is a square wave; lower values soften
+    /// the upper harmonics. Volume changes are smoothed over about a
+    /// millisecond so steps don't click, and the ends are faded.
+    fn chip(&mut self, seconds: f32, shape: impl Fn(f32) -> (f32, f32, f32)) -> &mut Self {
+        let rate = RATE as f32;
+        let n = Self::samples(seconds);
+        let fade = Self::samples(0.003).max(1);
+        let smoothing = 1.0 / (0.0012 * rate);
+        let mut level = 0.0;
+        for i in 0..n {
+            let (freq, volume, brightness) = shape(i as f32 / rate);
+            self.phase = (self.phase + std::f32::consts::TAU * freq / rate).rem_euclid(std::f32::consts::TAU);
+            // Odd harmonics, stopping short of the Nyquist limit.
+            let (mut s, mut weight, mut k) = (0.0, 1.0, 1.0);
+            while k * freq < 0.45 * rate && k <= 15.0 {
+                s += weight / k * (k * self.phase).sin();
+                weight *= brightness;
+                k += 2.0;
+            }
+            level += (volume - level) * smoothing;
+            let mut env = level;
+            if i < fade {
+                env *= i as f32 / fade as f32;
+            }
+            if n - 1 - i < fade {
+                env *= (n - 1 - i) as f32 / fade as f32;
+            }
+            self.out.push(s * env);
+        }
+        self
+    }
+
+    /// A chiptune "pyu": holds `freq` for `hold` seconds, then glides up
+    /// exponentially (time constant `rise`) while the volume falls to zero in
+    /// 15 even steps, like an old console's envelope, and the tone mellows.
+    fn chirp(&mut self, freq: f32, hold: f32, rise: f32, seconds: f32, level: f32) -> &mut Self {
+        self.chip(seconds, |t| {
+            let pitch = if t < hold { freq } else { freq * ((t - hold) / rise).exp() };
+            let volume = level * (15.0 * (1.0 - t / seconds)).ceil() / 15.0;
+            (pitch, volume, 1.0 - 0.5 * t / seconds)
+        })
+    }
+
+    /// Scale everything so the loudest sample is at `peak`.
+    fn normalize(&mut self, peak: f32) -> &mut Self {
+        let loudest = self.out.iter().fold(0.0_f32, |m, x| m.max(x.abs()));
+        if loudest > 0.0 {
+            self.out.iter_mut().for_each(|x| *x *= peak / loudest);
+        }
+        self
+    }
+}
+
+/// `a` at `t0` to `b` at `t1`, straight, holding outside that range.
+fn ramp(a: f32, b: f32, t0: f32, t1: f32, t: f32) -> f32 {
+    a + (b - a) * ((t - t0) / (t1 - t0)).clamp(0.0, 1.0)
 }
 
 /// The sound as 16-bit mono samples at 22.05 kHz.
 pub fn synthesize(sound: Sound, volume: f32) -> Vec<i16> {
-    let gain = volume.clamp(0.0, 1.0) * 0.8 * i16::MAX as f32;
+    let gain = volume.clamp(0.0, 1.0) * PEAK * i16::MAX as f32;
     render(sound).iter().map(|x| (x.clamp(-1.0, 1.0) * gain) as i16).collect()
 }
 
@@ -426,6 +531,97 @@ fn render(sound: Sound) -> Vec<f32> {
         Sound::BeepRise => {
             s.tone(1000.0, 0.1, Timbre::Sine).silence(0.05).tone(1500.0, 0.2, Timbre::Sine);
         }
+        // Overload: chiptune bleeps, matched to measurements of the clips
+        // they replace (pitches every 5 ms, volume every 10 ms).
+        Sound::OverloadPop => {
+            // A bubble pop: one quick glide up, about 360 Hz to 2 kHz.
+            s.chip(0.125, |t| {
+                let volume = if t < 0.015 {
+                    0.17 + 0.03 * t / 0.015
+                } else if t < 0.062 {
+                    0.2 + 0.8 * ((t - 0.015) / 0.047).powf(1.5)
+                } else if t < 0.07 {
+                    1.0
+                } else {
+                    (-(t - 0.07) / 0.02).exp()
+                };
+                (360.0 * (t / 0.0667).exp(), volume, 0.75)
+            })
+            .normalize(1.0);
+        }
+        Sound::OverloadTutorialPop => {
+            // A rising arpeggio, C4, G5, E6, louder on each note.
+            s.chip(0.148, |t| {
+                let (pitch, volume) = if t < 0.042 {
+                    (261.63, ramp(0.10, 0.25, 0.0, 0.042, t))
+                } else if t < 0.083 {
+                    (783.99, ramp(0.42, 0.58, 0.042, 0.083, t))
+                } else if t < 0.11 {
+                    (1318.51, 0.97)
+                } else if t < 0.128 {
+                    (1318.51, 0.85)
+                } else if t < 0.134 {
+                    (1318.51, 0.72)
+                } else {
+                    (1318.51, ramp(0.72, 0.0, 0.134, 0.148, t))
+                };
+                (pitch, volume, 0.9)
+            })
+            .normalize(1.0);
+        }
+        Sound::OverloadPer => {
+            // Two quick falling blips: D#5 sliding to D5, then a softer C5 to B4.
+            s.chip(0.114, |t| {
+                let pitch = if t < 0.072 {
+                    ramp(622.25, 587.33, 0.036, 0.046, t)
+                } else {
+                    ramp(523.25, 493.88, 0.094, 0.104, t)
+                };
+                let volume = if t < 0.012 {
+                    0.0
+                } else if t < 0.022 {
+                    ramp(0.3, 0.47, 0.012, 0.022, t)
+                } else if t < 0.032 {
+                    ramp(0.47, 0.95, 0.022, 0.032, t)
+                } else if t < 0.04 {
+                    1.0
+                } else if t < 0.066 {
+                    0.9
+                } else if t < 0.07 {
+                    ramp(0.9, 0.3, 0.066, 0.07, t)
+                } else if t < 0.076 {
+                    ramp(0.3, 0.55, 0.07, 0.076, t)
+                } else if t < 0.095 {
+                    ramp(0.55, 0.48, 0.076, 0.095, t)
+                } else if t < 0.1 {
+                    ramp(0.48, 0.18, 0.095, 0.1, t)
+                } else if t < 0.106 {
+                    ramp(0.18, 0.12, 0.1, 0.106, t)
+                } else {
+                    ramp(0.12, 0.0, 0.106, 0.114, t)
+                };
+                (pitch, volume, 0.8)
+            })
+            .normalize(1.0);
+        }
+        Sound::OverloadNade => {
+            // Two "pyu" chirps: F6 and A#5, each holding then gliding up.
+            s.chirp(1396.91, 0.038, 0.30, 0.12, 1.0)
+                .silence(0.035)
+                .chirp(932.33, 0.05, 0.28, 0.17, 1.0)
+                .normalize(1.0);
+        }
+        Sound::OverloadNadeLong => {
+            // Four chirps: F6, A#5, F5 and a softer G#5.
+            s.chirp(1396.91, 0.055, 0.45, 0.135, 1.0)
+                .silence(0.089)
+                .chirp(932.33, 0.075, 0.48, 0.19, 1.0)
+                .silence(0.045)
+                .chirp(698.46, 0.065, 0.137, 0.19, 1.0)
+                .silence(0.049)
+                .chirp(830.61, 0.06, 0.148, 0.175, 0.51)
+                .normalize(1.0);
+        }
         Sound::Silent => {}
     }
     s.out
@@ -455,8 +651,10 @@ pub fn wav(samples: &[i16]) -> Vec<u8> {
 
 // ------------------------------------------------------------------ playback
 
+/// Play a complete WAV image. A sound that `yield_to_playing` is skipped if
+/// another one is already playing, instead of cutting it off.
 #[cfg(windows)]
-fn play_wav(bytes: Vec<u8>) {
+fn play_wav(bytes: Vec<u8>, yield_to_playing: bool) {
     #[link(name = "winmm")]
     unsafe extern "system" {
         fn PlaySoundW(sound: *const u16, module: *mut std::ffi::c_void, flags: u32) -> i32;
@@ -464,22 +662,24 @@ fn play_wav(bytes: Vec<u8>) {
     const SND_SYNC: u32 = 0x0000;
     const SND_NODEFAULT: u32 = 0x0002;
     const SND_MEMORY: u32 = 0x0004;
+    // Normally PlaySound stops whatever this app is already playing; with
+    // SND_NOSTOP it gives up on the new sound instead.
+    const SND_NOSTOP: u32 = 0x0010;
+    let flags = SND_MEMORY | SND_NODEFAULT | SND_SYNC | if yield_to_playing { SND_NOSTOP } else { 0 };
     // Played synchronously on its own thread, so the buffer outlives the sound.
     std::thread::spawn(move || {
         // SAFETY: with SND_MEMORY the first argument points to a complete WAV
         // image, which `bytes` holds until PlaySoundW returns.
         unsafe {
-            PlaySoundW(
-                bytes.as_ptr().cast(),
-                std::ptr::null_mut(),
-                SND_MEMORY | SND_NODEFAULT | SND_SYNC,
-            );
+            PlaySoundW(bytes.as_ptr().cast(), std::ptr::null_mut(), flags);
         }
     });
 }
 
+/// Each sound gets its own player process, so sounds overlap rather than
+/// cutting each other off, and nothing needs to yield.
 #[cfg(target_os = "linux")]
-fn play_wav(bytes: Vec<u8>) {
+fn play_wav(bytes: Vec<u8>, _yield_to_playing: bool) {
     use std::process::{Command, Stdio};
     use std::sync::atomic::{AtomicU32, Ordering};
     static NEXT: AtomicU32 = AtomicU32::new(0);
@@ -508,7 +708,7 @@ fn play_wav(bytes: Vec<u8>) {
 }
 
 #[cfg(not(any(windows, target_os = "linux")))]
-fn play_wav(_bytes: Vec<u8>) {}
+fn play_wav(_bytes: Vec<u8>, _yield_to_playing: bool) {}
 
 #[cfg(test)]
 mod tests {
@@ -616,6 +816,44 @@ mod tests {
         for p in Preset::ALL {
             for alert in Alert::ALL {
                 assert!(Sound::ALL.contains(&p.sounds().get(alert)));
+            }
+        }
+    }
+
+    /// The Overload bleeps hit the notes measured from the clips they
+    /// replace, at the same moments, and last as long.
+    #[test]
+    fn overload_sounds_match_the_measured_clips() {
+        let ms = |t: f32| (t * RATE as f32).round() as usize;
+        /// A note heard from `.0` to `.1` seconds, at `.2` Hz.
+        type Note = (f32, f32, f32);
+        // (sound, length in s, notes)
+        let checks: [(Sound, f32, &[Note]); 5] = [
+            // The glide: 360 Hz × e^(t / 66.7 ms), checked at two moments.
+            (Sound::OverloadPop, 0.125, &[(0.030, 0.045, 632.0), (0.080, 0.095, 1337.0)]),
+            (
+                Sound::OverloadTutorialPop,
+                0.148,
+                &[(0.010, 0.035, 261.63), (0.050, 0.078, 783.99), (0.090, 0.125, 1318.51)],
+            ),
+            (
+                Sound::OverloadPer,
+                0.114,
+                &[(0.015, 0.034, 622.25), (0.050, 0.068, 587.33), (0.076, 0.092, 523.25)],
+            ),
+            (Sound::OverloadNade, 0.325, &[(0.005, 0.035, 1396.91), (0.160, 0.200, 932.33)]),
+            (
+                Sound::OverloadNadeLong,
+                0.873,
+                &[(0.005, 0.050, 1396.91), (0.230, 0.290, 932.33), (0.465, 0.520, 698.46), (0.705, 0.755, 830.61)],
+            ),
+        ];
+        for (sound, length, notes) in checks {
+            let s = synthesize(sound, 1.0);
+            assert!((seconds(s.len()) - length).abs() < 0.002, "{sound:?}: {}s", seconds(s.len()));
+            for &(from, to, want) in notes {
+                let got = freq(&s[ms(from)..ms(to)]);
+                assert!((got - want).abs() / want < 0.04, "{sound:?} {from}-{to}s: {got} Hz, want {want}");
             }
         }
     }

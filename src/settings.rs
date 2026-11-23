@@ -58,6 +58,11 @@ pub struct Settings {
     pub alert_sounds: crate::sound::AlertSounds,
     /// 0..=1
     pub sound_volume: f32,
+    /// Overload theme: pop on every button, tab and checkbox click.
+    pub click_sounds: bool,
+    /// The alert sounds picked before switching to Overload (which brings its
+    /// own), put back when switching away again.
+    pub sounds_before_overload: Option<crate::sound::AlertSounds>,
 }
 
 impl Default for Settings {
@@ -84,6 +89,8 @@ impl Default for Settings {
             sound_on: true,
             alert_sounds: crate::sound::AlertSounds::default(),
             sound_volume: 0.6,
+            click_sounds: true,
+            sounds_before_overload: None,
         }
     }
 }

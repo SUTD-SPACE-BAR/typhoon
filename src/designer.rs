@@ -7,7 +7,7 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
 use eframe::egui::{
-    self, Align, Button, Color32, CornerRadius, DragValue, Frame, Layout, Margin, RichText,
+    self, Align, Button, Color32, DragValue, Frame, Layout, Margin, RichText,
     ScrollArea, Stroke, Ui,
 };
 
@@ -391,8 +391,8 @@ impl Designer {
             ui.add_space(10.0);
             let generating = self.is_generating();
             let label = if generating { "Generating…" } else { "▶ Generate G-code" };
-            let button = Button::new(RichText::new(label).strong().color(Color32::WHITE))
-                .fill(theme::RED);
+            let button = Button::new(RichText::new(label).strong().color(p.on_accent))
+                .fill(p.accent_fill);
             let errors = issues.iter().filter(|i| i.severity == Severity::Error).count();
             let response = ui
                 .add_enabled(!generating && !has_errors, button)
@@ -506,7 +506,7 @@ impl Designer {
         Frame::NONE
             .fill(p.inset)
             .stroke(Stroke::new(1.0, stroke_color))
-            .corner_radius(CornerRadius::same(6))
+            .corner_radius(p.corner(6))
             .inner_margin(Margin::same(8))
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
@@ -520,7 +520,7 @@ impl Designer {
                     {
                         *collapsed = !*collapsed;
                     }
-                    ui.label(RichText::new(format!("{}", i + 1)).strong().color(theme::RED));
+                    ui.label(RichText::new(format!("{}", i + 1)).strong().color(p.accent));
 
                     let layer = &mut self.params.layers[i];
                     let current = layer.wind_type();

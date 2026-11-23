@@ -10,6 +10,12 @@ a Rust port of [cyclone](https://github.com/reilleya/cyclone) by
 [Andrew Reilley](https://github.com/reilleya); for the same `.wind` file it
 produces the same G-code, line for line. Licensed under GPL-3.0.
 
+![The Wind Designer in the dark theme](docs/screenshots/designer-dark.png)
+
+| Preview (unrolled mandrel) | Preview (3D view) |
+|---|---|
+| ![Toolpath preview of the mandrel surface unrolled flat](docs/screenshots/preview-light.png) | ![The same wind wrapped around a 3D tube](docs/screenshots/preview-3d-dark.png) |
+
 ## What it does
 
 - **Wind Designer**: edit mandrel, tow and layers (hoop, helical, skip); loads and
@@ -22,9 +28,12 @@ produces the same G-code, line for line. Licensed under GPL-3.0.
 - **Machine control**: COM port picker (USB ports first), console with history,
   jog, Home X / Home Z, set mandrel zero, motors off, E-STOP.
 - **Jobs**: start checklist, pause/resume, stop, speed override, progress and ETA.
-- **Alert sounds** (optional): ALR-67 RWR tones, Bambu A1-style beeps, chimes or
-  plain beeps, for errors, alerts, homing done and wind done (see below).
-- **Light / dark / system theme**, UI scaling for small screens.
+- **Alert sounds** (optional): ALR-67 RWR tones, Bambu A1-style beeps, chimes,
+  plain beeps or the Overload clips, for errors, alerts, homing done and wind
+  done (see below).
+- **Light / dark / system themes**, plus **Overload**: a pastel Windows 98 /
+  vaporwave theme with a pixel font, its own alert sounds and click pops.
+  UI scaling for small screens.
 
 Axes, as in cyclone: **X** carriage (mm), **Y** mandrel (degrees),
 **Z** delivery head (degrees).
@@ -119,6 +128,30 @@ documented, so Typhoon uses a square-wave tone.
 sounds with its motors): the error is a beep-beep on G3 followed by another a
 semitone lower. Bambu doesn't publish what its error sound is, so this is a
 lookalike, not a copy.
+
+**Overload** uses chiptune bleeps: square-wave notes with pitch glides and
+stepped volume envelopes, built from measurements of short game-style clips.
+Per-per (two falling blips) is for errors, Tutorial pop (a rising C–G–E
+arpeggio) for alerts, Nade-nade (two rising "pyu" chirps) for homing done and
+the long Nade-nade (four) for wind done. Picking the Overload theme switches to
+this preset; switching to another
+theme puts your previous choices back. In Overload, clicking a button, tab,
+checkbox or dropdown also plays a quiet pop (turn it off with **Pop on every
+click**). A pop never cuts off an alert that's already playing.
+
+## Overload theme
+
+Pick **💗 Overload** in **Preferences > Appearance**. Cards become Windows 98
+windows with gradient title bars (their minimise, maximise and close boxes are
+only decoration), on a desktop tiled with pixel-art X's and sparkles
+(`assets/overload-tile.svg`) instead of the Space Bar logo.
+Start buttons, progress and the selected tab turn hot pink, but E-STOP, stop
+buttons and errors stay red in every theme.
+
+![The Overload theme](docs/screenshots/overload.png)
+
+The pixel font is [DotGothic16](https://github.com/fontworks-fonts/DotGothic16), used
+under the SIL Open Font License (`assets/fonts/OFL.txt`).
 
 ## Before the first real wind
 
