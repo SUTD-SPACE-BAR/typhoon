@@ -10,6 +10,12 @@ a Rust port of [cyclone](https://github.com/reilleya/cyclone) by
 [Andrew Reilley](https://github.com/reilleya); for the same `.wind` file it
 produces the same G-code, line for line. Licensed under GPL-3.0.
 
+![The Wind Designer in the dark theme](docs/screenshots/designer-dark.png)
+
+| Preview (unrolled mandrel) | Preview (3D view) |
+|---|---|
+| ![Toolpath preview of the mandrel surface unrolled flat](docs/screenshots/preview-light.png) | ![The same wind wrapped around a 3D tube](docs/screenshots/preview-3d-dark.png) |
+
 ## What it does
 
 - **Wind Designer**: edit mandrel, tow and layers (hoop, helical, skip); loads and
@@ -141,6 +147,8 @@ only decoration), on a desktop tiled with pixel-art X's and sparkles
 (`assets/overload-tile.svg`) instead of the Space Bar logo.
 Start buttons, progress and the selected tab turn hot pink, but E-STOP, stop
 buttons and errors stay red in every theme.
+
+![The Overload theme](docs/screenshots/overload.png)
 
 The pixel font is [DotGothic16](https://github.com/fontworks-fonts/DotGothic16), used
 under the SIL Open Font License (`assets/fonts/OFL.txt`).
