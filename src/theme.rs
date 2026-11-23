@@ -256,7 +256,9 @@ mod tests {
             include_str!("app.rs"),
             include_str!("designer.rs"),
             include_str!("preview.rs"),
+            include_str!("sound.rs"),
             include_str!("theme.rs"),
+            include_str!("tube3d.rs"),
             include_str!("serial/mod.rs"),
             include_str!("serial/worker.rs"),
         ];

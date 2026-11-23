@@ -17,6 +17,7 @@ use eframe::egui::{
 use resvg::tiny_skia;
 
 use crate::theme;
+use crate::tube3d::TubeView;
 
 /// Layer colours (Space Bar Red first), cycled for more layers.
 const LAYER_COLORS: [Color32; 8] = [
@@ -296,6 +297,8 @@ pub struct Preview {
     /// World point (mm) at the centre of the view.
     center: Option<Pos2>,
     true_aspect: bool,
+    /// The 3D tube view, only while it's switched on.
+    tube: Option<TubeView>,
 }
 
 impl Default for Preview {
@@ -310,11 +313,17 @@ impl Default for Preview {
             zoom: 1.0,
             center: None,
             true_aspect: true,
+            tube: None,
         }
     }
 }
 
 impl Preview {
+    /// Showing the 3D tube rather than the unwrapped surface.
+    pub fn is_3d(&self) -> bool {
+        self.tube.is_some()
+    }
+
     /// Keep the preview in step with the G-code to show.
     pub fn sync(&mut self, ctx: &egui::Context, plan: Option<&Arc<Vec<String>>>) {
         // Pick up a finished render.
@@ -426,11 +435,27 @@ impl Preview {
                 visibility_changed = true;
             }
             ui.separator();
-            ui.checkbox(&mut self.true_aspect, "True proportions")
-                .on_hover_text("Off: stretch to fill the view (angles look distorted)");
-            if ui.small_button("Fit").on_hover_text("Reset zoom (or double-click the plot)").clicked() {
-                self.zoom = 1.0;
-                self.center = None;
+            let mut in_3d = self.tube.is_some();
+            if ui
+                .toggle_value(&mut in_3d, "3D view")
+                .on_hover_text(
+                    "Wrap the preview around a 3D tube. Nothing 3D is drawn until this is on.",
+                )
+                .changed()
+            {
+                self.tube = in_3d.then(TubeView::default);
+            }
+            if let Some(tube) = &mut self.tube {
+                if ui.small_button("Reset view").on_hover_text("Or double-click the tube").clicked() {
+                    *tube = TubeView::default();
+                }
+            } else {
+                ui.checkbox(&mut self.true_aspect, "True proportions")
+                    .on_hover_text("Off: stretch to fill the view (angles look distorted)");
+                if ui.small_button("Fit").on_hover_text("Reset zoom (or double-click the plot)").clicked() {
+                    self.zoom = 1.0;
+                    self.center = None;
+                }
             }
             if self.job.is_some() {
                 ui.spinner();
@@ -444,6 +469,12 @@ impl Preview {
                 RichText::new("⚠ The wind changed since this G-code was generated.")
                     .color(theme::WARN_AMBER),
             );
+        }
+
+        if let Some(tube) = &mut self.tube {
+            let texture = self.texture.as_ref().map(|t| t.id());
+            tube.ui(ui, &tp, texture, marker, &p);
+            return;
         }
 
         // Plot area, leaving room for axis labels.

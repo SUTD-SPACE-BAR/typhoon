@@ -16,7 +16,9 @@ produces the same G-code, line for line. Licensed under GPL-3.0.
   saves cyclone `.wind` files; flags pattern numbers that don't divide the
   circuit count and other mistakes; estimates time and tow length.
 - **Preview**: the mandrel surface unrolled flat, tows at true width and angle,
-  layer by layer, with a live marker while winding.
+  layer by layer, with a live marker while winding. An optional **3D view**
+  wraps it around the tube (drag to turn, scroll to zoom); it's only drawn while
+  switched on, and only redrawn while you move it, so old laptops cope.
 - **Machine control**: COM port picker (USB ports first), console with history,
   jog, Home X / Home Z, set mandrel zero, motors off, E-STOP.
 - **Jobs**: start checklist, pause/resume, stop, speed override, progress and ETA.

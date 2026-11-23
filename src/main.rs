@@ -12,6 +12,7 @@ mod serial;
 mod settings;
 mod sound;
 mod theme;
+mod tube3d;
 
 use eframe::egui;
 

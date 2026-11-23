@@ -1062,7 +1062,12 @@ impl TyphoonApp {
                             (stale, None)
                         };
                         let preview = &mut self.preview;
-                        theme::card_fixed(ui, "Preview · unwrapped mandrel", main_height, |ui| {
+                        let title = if preview.is_3d() {
+                            "Preview · 3D tube"
+                        } else {
+                            "Preview · unwrapped mandrel"
+                        };
+                        theme::card_fixed(ui, title, main_height, |ui| {
                             preview.ui(ui, stale, marker);
                         });
                     }
