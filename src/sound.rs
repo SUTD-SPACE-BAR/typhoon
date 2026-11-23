@@ -648,6 +648,18 @@ mod tests {
         assert_ne!(ok, 0, "PlaySound rejected the WAV");
     }
 
+    /// Writes every sound to `target/sounds/` to listen to:
+    /// `cargo test write_sound_files -- --ignored`
+    #[test]
+    #[ignore]
+    fn write_sound_files() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target").join("sounds");
+        std::fs::create_dir_all(&dir).unwrap();
+        for sound in Sound::ALL.into_iter().filter(|s| *s != Sound::Silent) {
+            std::fs::write(dir.join(format!("{sound:?}.wav")), wav(&synthesize(sound, 1.0))).unwrap();
+        }
+    }
+
     #[test]
     fn repeats_are_rate_limited() {
         let mut p = Player::default();
