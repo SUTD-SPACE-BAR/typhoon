@@ -9,13 +9,13 @@
 use std::f32::consts::TAU;
 
 use eframe::egui::{
-    Align2, Color32, CornerRadius, Mesh, PointerButton, Pos2, Sense, Shape, Stroke, TextStyle,
-    TextureId, Ui, Vec2,
+    Align2, Color32, Mesh, PointerButton, Pos2, Sense, Shape, Stroke, TextStyle, TextureId, Ui,
+    Vec2,
     epaint::{Vertex, WHITE_UV},
 };
 
 use crate::preview::Toolpath;
-use crate::theme::{self, Palette};
+use crate::theme::Palette;
 
 /// Facets around the tube: enough for a smooth outline. The tows come from
 /// the preview image, so this doesn't limit their detail.
@@ -97,7 +97,7 @@ impl TubeView {
         }
 
         let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, CornerRadius::same(4), p.well);
+        painter.rect_filled(rect, p.corner(4), p.well);
 
         // Scale so the starting pose fills the view, and keep it while turning.
         let (lo, hi) = projected_bounds(&start_pose(), length, radius);
@@ -173,7 +173,7 @@ impl TubeView {
                 let at = project(point(mx as f32 - half, a));
                 painter.circle_stroke(at, 9.0, Stroke::new(5.0, Color32::from_black_alpha(140)));
                 painter.circle_stroke(at, 9.0, Stroke::new(2.5, Color32::WHITE));
-                painter.circle_filled(at, 3.0, theme::RED);
+                painter.circle_filled(at, 3.0, p.accent);
             }
         }
 

@@ -551,7 +551,7 @@ impl Preview {
                 let ring = Stroke::new(2.5, Color32::WHITE);
                 plot_painter.circle_stroke(at, 9.0, Stroke::new(5.0, Color32::from_black_alpha(140)));
                 plot_painter.circle_stroke(at, 9.0, ring);
-                plot_painter.circle_filled(at, 3.0, theme::RED);
+                plot_painter.circle_filled(at, 3.0, p.accent);
             }
         }
 
@@ -617,7 +617,7 @@ impl Preview {
                 let galley = painter.layout_no_wrap(text, font.clone(), p.text);
                 let pos = plot.right_top() + Vec2::new(-galley.size().x - 8.0, 6.0);
                 let bg = Rect::from_min_size(pos - Vec2::splat(4.0), galley.size() + Vec2::splat(8.0));
-                painter.rect_filled(bg, CornerRadius::same(4), p.card);
+                painter.rect_filled(bg, p.corner(4), p.card);
                 painter.galley(pos, galley, p.text);
             }
         }
