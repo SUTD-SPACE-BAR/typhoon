@@ -1,0 +1,17 @@
+{
+    "layers": [
+        {
+            "windType": "helical",
+            "windAngle": 55,
+            "patternNumber": 4,
+            "skipIndex": 1,
+            "lockDegrees": 720,
+            "leadInMM": 30,
+            "leadOutDegrees": 90
+        },
+        { "windType": "hoop" }
+    ],
+    "mandrelParameters": { "diameter": 69.75, "windLength": 80 },
+    "towParameters": { "width": 7, "thickness": 0.5 },
+    "defaultFeedRate": 9000
+}

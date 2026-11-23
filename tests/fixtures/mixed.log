@@ -1,0 +1,27 @@
+Layer 1 of 6: hoop
+Layer time estimate: 151.32806811788717 seconds
+Layer tow required: 6.706034288604252 meters
+--------------------------------------------------------------------------------
+Layer 2 of 6: helical
+Doing helical wind, 23 circuits
+Layer time estimate: 373.730249877398 seconds
+Layer tow required: 17.30609789334524 meters
+--------------------------------------------------------------------------------
+Layer 3 of 6: helical
+Doing helical wind, 11 circuits
+Layer time estimate: 209.63197638194265 seconds
+Layer tow required: 9.484715045291633 meters
+--------------------------------------------------------------------------------
+Layer 4 of 6: skip
+Layer time estimate: 0.8999999999999773 seconds
+Layer tow required: 0.03989822670058629 meters
+--------------------------------------------------------------------------------
+Layer 5 of 6: hoop
+Layer time estimate: 75.66403405894516 seconds
+Layer tow required: 3.353017144302214 meters
+--------------------------------------------------------------------------------
+WARN WARNING: Attempting to plan a layer after a terminal layer, aborting...
+
+Total time estimate: 811.254328436173 seconds
+Total tow required: 36.88976259824393 meters
+

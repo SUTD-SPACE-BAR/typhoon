@@ -1,0 +1,14 @@
+Layer 1 of 2: helical
+Doing helical wind, 18 circuits
+WARN Circuit number of 18 not divisible by pattern number of 4
+Layer time estimate: 0 seconds
+Layer tow required: 0 meters
+--------------------------------------------------------------------------------
+Layer 2 of 2: hoop
+Layer time estimate: 60.08799784440136 seconds
+Layer tow required: 5.480707144292938 meters
+--------------------------------------------------------------------------------
+
+Total time estimate: 60.08799784440136 seconds
+Total tow required: 5.480707144292938 meters
+
