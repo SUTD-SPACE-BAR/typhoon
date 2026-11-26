@@ -21,6 +21,8 @@ use crate::theme;
 /// Width at which the summary moves beside the editor instead of below it.
 const SIDE_BY_SIDE_WIDTH: f32 = 640.0;
 const SUMMARY_WIDTH: f32 = 270.0;
+/// Width the line between the editor and the summary takes.
+const SEPARATOR_WIDTH: f32 = 6.0;
 
 pub fn default_wind() -> WindParameters {
     // The example from cyclone's README.
@@ -316,7 +318,10 @@ impl Designer {
         let avail = ui.available_size();
         if avail.x >= SIDE_BY_SIDE_WIDTH {
             ui.horizontal_top(|ui| {
-                let gap = ui.spacing().item_spacing.x * 2.0 + 1.0;
+                // The editor gets what the summary, the separator and the
+                // spacing either side of it leave, so the row fits exactly.
+                // Wider, and the card would poke into the console column.
+                let gap = ui.spacing().item_spacing.x * 2.0 + SEPARATOR_WIDTH;
                 let left_w = avail.x - SUMMARY_WIDTH - gap;
                 ui.allocate_ui_with_layout(
                     egui::vec2(left_w, avail.y),
@@ -328,7 +333,7 @@ impl Designer {
                             .show(ui, |ui| self.editor(ui, &issues));
                     },
                 );
-                ui.separator();
+                ui.add(egui::Separator::default().spacing(SEPARATOR_WIDTH));
                 ui.allocate_ui_with_layout(
                     egui::vec2(SUMMARY_WIDTH, avail.y),
                     Layout::top_down(Align::Min),
@@ -850,6 +855,32 @@ pub fn format_duration(seconds: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Laid out in a given width, side by side or stacked, the designer
+    /// stays inside it, so its card never pokes into the console column.
+    #[test]
+    fn fits_the_width_it_is_given() {
+        for width in [500.0, 640.0, 820.0, 1100.0] {
+            let ctx = egui::Context::default();
+            let mut designer = Designer::new(None, None);
+            let mut used = 0.0;
+            // A few frames, so everything has been measured once.
+            for _ in 0..3 {
+                let input = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 900.0))),
+                    ..Default::default()
+                };
+                let mut output = ctx.run_ui(input, |ui| {
+                    let rect = egui::Rect::from_min_size(egui::pos2(10.0, 10.0), egui::vec2(width, 600.0));
+                    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect));
+                    designer.ui(&mut child, &mut false);
+                    used = child.min_rect().width();
+                });
+                output.textures_delta.clear();
+            }
+            assert!(used <= width + 0.01, "{used} points wide in {width}");
+        }
+    }
 
     #[test]
     fn default_wind_is_valid() {
