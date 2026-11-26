@@ -1,23 +1,31 @@
 //! Unwrapped-mandrel preview of the generated G-code, like cyclone's `plot`
-//! command but interactive.
+//! command but interactive, with an optional 3D view of the tow paths
+//! (`tube3d`) and a layer range slider for both.
 //!
 //! The mandrel surface is cut along its length and laid flat: X is carriage
 //! position (mm) and Y is the distance around the mandrel. Unlike cyclone's
 //! plot (which uses degrees as pixels), Y is in mm of surface arc, so wind
 //! angles on screen are the real angles. Tows are drawn at their real width,
 //! each with a darker edge so crossings stay visible, coloured by layer.
+//!
+//! Angles are where the mandrel really is, so each layer sits where it's
+//! wound even though cyclone re-zeroes Y between layers (see [`Run`]).
 
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
 use eframe::egui::{
-    self, Color32, ColorImage, CornerRadius, Pos2, Rect, RichText, Sense, Stroke, TextureHandle,
-    TextureOptions, Ui, Vec2,
+    self, Color32, ColorImage, CornerRadius, Key, Modifiers, Pos2, Rect, RichText, Sense, Stroke,
+    TextureHandle, TextureOptions, Ui, Vec2,
 };
+use eframe::glow;
 use resvg::tiny_skia;
 
-use crate::theme;
-use crate::tube3d::TubeView;
+use crate::layer_slider;
+use crate::theme::{self, Palette};
+use crate::tow_gl::TowGl;
+use crate::tow_paths::{self, TowMesh};
+use crate::tube3d::{Show, TubeView};
 
 /// Layer colours (Space Bar Red first), cycled for more layers.
 const LAYER_COLORS: [Color32; 8] = [
@@ -51,9 +59,26 @@ pub struct Piece {
     pub layer: u16,
 }
 
+/// A straight run of tow, from (x0 mm, a0°) to (x1, a1): where the carriage
+/// and mandrel really are, counted from the start of the G-code. A G92 renames
+/// the current position without moving anything, so it doesn't change these;
+/// cyclone re-zeroes Y between layers, and not always by whole turns.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Run {
+    pub x0: f64,
+    pub a0: f64,
+    pub x1: f64,
+    pub a1: f64,
+    pub layer: u16,
+}
+
 #[derive(Clone, Debug)]
 pub struct Toolpath {
+    /// The runs, cut at the 0°/360° seam, for the unwrapped view.
     pub pieces: Vec<Piece>,
+    /// The path as straight runs (the planner's ~1 mm moves joined back
+    /// together), for the 3D view.
+    pub runs: Vec<Run>,
     /// Mandrel length covered by the plot (wind length), mm.
     pub length: f32,
     /// Distance around the mandrel (circumference), mm.
@@ -61,6 +86,22 @@ pub struct Toolpath {
     pub tow_width: f32,
     /// Label for each layer, e.g. "helical".
     pub layers: Vec<String>,
+    /// Each G92 that renamed the position: (line index, X offset mm, angle
+    /// offset °). From the line after it, real position = G-code position +
+    /// offset.
+    pub offsets: Vec<(usize, f64, f64)>,
+}
+
+impl Toolpath {
+    /// The real position (mm, degrees) of a G-code position, once lines
+    /// `..sent` have been sent (so their G92s apply).
+    pub fn real_position(&self, x: f64, y: f64, sent: usize) -> (f64, f64) {
+        let applied = self.offsets.partition_point(|(line, ..)| *line < sent);
+        match applied.checked_sub(1).map(|i| self.offsets[i]) {
+            Some((_, dx, da)) => (x + dx, y + da),
+            None => (x, y),
+        }
+    }
 }
 
 /// Rebuild the toolpath from G-code: follows G0/G1 moves and G92 resets,
@@ -73,11 +114,15 @@ pub fn parse_toolpath(gcode: &[String]) -> Toolpath {
     let mut layers: Vec<String> = Vec::new();
     let mut current_layer: Option<u16> = None;
 
+    // Where the machine is in G-code coordinates, and what to add to that
+    // for where it really is.
     let (mut x, mut y) = (0.0_f64, 0.0_f64);
-    let mut moves: Vec<(f64, f64, f64, f64, u16)> = Vec::new();
+    let (mut dx, mut da) = (0.0_f64, 0.0_f64);
+    let mut offsets = Vec::new();
+    let mut runs: Vec<Run> = Vec::new();
     let mut max_x: f64 = 0.0;
 
-    for line in gcode {
+    for (index, line) in gcode.iter().enumerate() {
         let line = line.trim();
         if let Some(comment) = line.strip_prefix(';') {
             let comment = comment.trim();
@@ -114,16 +159,23 @@ pub fn parse_toolpath(gcode: &[String]) -> Toolpath {
                 let (tx, ty) = (nx.unwrap_or(x), ny.unwrap_or(y));
                 if let Some(layer) = current_layer
                     && (tx != x || ty != y) {
-                        moves.push((x, y, tx, ty, layer));
+                        let real = Run { x0: x + dx, a0: y + da, x1: tx + dx, a1: ty + da, layer };
+                        push_move(&mut runs, real);
                     }
                 x = tx;
                 y = ty;
-                max_x = max_x.max(x);
+                max_x = max_x.max(x + dx);
             }
-            // Set position without moving.
+            // Rename the current position without moving.
             "G92" => {
-                x = nx.unwrap_or(x);
-                y = ny.unwrap_or(y);
+                let (tx, ty) = (nx.unwrap_or(x), ny.unwrap_or(y));
+                if tx != x || ty != y {
+                    dx += x - tx;
+                    da += y - ty;
+                    offsets.push((index, dx, da));
+                }
+                x = tx;
+                y = ty;
             }
             _ => {}
         }
@@ -135,26 +187,52 @@ pub fn parse_toolpath(gcode: &[String]) -> Toolpath {
     let tow_width = tow_width.unwrap_or(length / 100.0).max(0.01);
     let mm_per_degree = circumference / 360.0;
 
-    let mut pieces = Vec::with_capacity(moves.len() + moves.len() / 4);
-    for (x0, d0, x1, d1, layer) in moves {
-        split_at_seam(x0, d0, x1, d1, |(ax, ad), (bx, bd)| {
+    let mut pieces = Vec::with_capacity(runs.len() * 2);
+    for run in &runs {
+        split_at_seam(run.x0, run.a0, run.x1, run.a1, |(ax, ad), (bx, bd)| {
             pieces.push(Piece {
                 x0: ax as f32,
                 y0: (ad * mm_per_degree) as f32,
                 x1: bx as f32,
                 y1: (bd * mm_per_degree) as f32,
-                layer,
+                layer: run.layer,
             });
         });
     }
 
     Toolpath {
         pieces,
+        runs,
         length: length as f32,
         circumference: circumference as f32,
         tow_width: tow_width as f32,
         layers,
+        offsets,
     }
+}
+
+/// Add a move to the path, extending the last run when the move carries
+/// straight on from it (the planner splits each move into ~1 mm pieces).
+fn push_move(runs: &mut Vec<Run>, m: Run) {
+    if let Some(last) = runs.last_mut()
+        && last.layer == m.layer
+        && carries_on(last, &m)
+    {
+        last.x1 = m.x1;
+        last.a1 = m.a1;
+    } else {
+        runs.push(m);
+    }
+}
+
+/// Whether `next` heads the same way as `run`, give or take the G-code's
+/// rounding. Moves always start where the last one ended.
+fn carries_on(run: &Run, next: &Run) -> bool {
+    let (ax, aa) = (run.x1 - run.x0, run.a1 - run.a0);
+    let (bx, ba) = (next.x1 - next.x0, next.a1 - next.a0);
+    let dot = ax * bx + aa * ba;
+    let cross = ax * ba - aa * bx;
+    dot > 0.0 && cross.abs() <= 1e-5 * ax.hypot(aa) * bx.hypot(ba)
 }
 
 /// Split a move from (x0, d0°) to (x1, d1°) where it crosses a multiple of
@@ -279,8 +357,28 @@ pub fn render(tp: &Toolpath, visible: &[bool], max_side: usize) -> ColorImage {
 
 // ---------------------------------------------------------------------- UI
 
-struct RenderJob {
-    rx: Receiver<(Arc<Toolpath>, ColorImage)>,
+/// Where a running job is: the target of the last line sent, in G-code
+/// coordinates, once lines `..sent` have gone to the board.
+#[derive(Clone, Copy, Debug)]
+pub struct JobMarker {
+    pub x: f64,
+    pub y: f64,
+    pub sent: usize,
+}
+
+/// What the background thread made: always the toolpath, plus whatever the
+/// view on screen was missing.
+struct Done {
+    toolpath: Arc<Toolpath>,
+    /// The unwrapped image, and which layers it shows.
+    image: Option<(Vec<bool>, ColorImage)>,
+    mesh: Option<TowMesh>,
+}
+
+struct Work {
+    /// The G-code it's working on.
+    source: Arc<Vec<String>>,
+    rx: Receiver<Done>,
 }
 
 pub struct Preview {
@@ -288,17 +386,26 @@ pub struct Preview {
     source: Option<Arc<Vec<String>>>,
     toolpath: Option<Arc<Toolpath>>,
     texture: Option<TextureHandle>,
-    job: Option<RenderJob>,
-    /// Re-render once the running job finishes (settings changed meanwhile).
-    rerender: bool,
-    visible: Vec<bool>,
+    /// Which layers `texture` shows.
+    texture_layers: Vec<bool>,
+    work: Option<Work>,
+    /// The background thread died on this G-code (a bug): don't retry it.
+    failed: bool,
+    /// The layer chips: false for a layer switched off.
+    chips: Vec<bool>,
+    /// Lowest and highest layer shown, from the slider (inclusive).
+    range: (usize, usize),
     /// 1.0 = whole mandrel fits the view.
     zoom: f32,
     /// World point (mm) at the centre of the view.
     center: Option<Pos2>,
     true_aspect: bool,
+    /// 3D: thin centre lines instead of tows at their true width.
+    thin_lines: bool,
     /// The 3D tube view, only while it's switched on.
     tube: Option<TubeView>,
+    /// What closed 3D views left on the GPU, freed in `sync`.
+    retired: Vec<TowGl>,
 }
 
 impl Default for Preview {
@@ -307,13 +414,17 @@ impl Default for Preview {
             source: None,
             toolpath: None,
             texture: None,
-            job: None,
-            rerender: false,
-            visible: Vec::new(),
+            texture_layers: Vec::new(),
+            work: None,
+            failed: false,
+            chips: Vec::new(),
+            range: (0, 0),
             zoom: 1.0,
             center: None,
             true_aspect: true,
+            thin_lines: false,
             tube: None,
+            retired: Vec::new(),
         }
     }
 }
@@ -324,24 +435,20 @@ impl Preview {
         self.tube.is_some()
     }
 
-    /// Keep the preview in step with the G-code to show.
-    pub fn sync(&mut self, ctx: &egui::Context, plan: Option<&Arc<Vec<String>>>) {
-        // Pick up a finished render.
-        if let Some(job) = &self.job {
-            match job.rx.try_recv() {
-                Ok((tp, image)) => {
-                    self.job = None;
-                    if self.visible.len() != tp.layers.len() {
-                        self.visible = vec![true; tp.layers.len()];
-                    }
-                    self.toolpath = Some(tp);
-                    self.texture =
-                        Some(ctx.load_texture("wind-preview", image, TextureOptions::LINEAR));
-                }
-                Err(TryRecvError::Empty) => {}
-                Err(TryRecvError::Disconnected) => self.job = None,
-            }
+    /// Keep the preview in step with the G-code to show. `gl` (the OpenGL
+    /// context) frees what closed 3D views left on the GPU.
+    pub fn sync(
+        &mut self,
+        ctx: &egui::Context,
+        plan: Option<&Arc<Vec<String>>>,
+        gl: Option<&glow::Context>,
+    ) {
+        match gl {
+            Some(gl) => self.retired.drain(..).for_each(|closed| closed.destroy(gl)),
+            // Not OpenGL: nothing was ever put on a GPU.
+            None => self.retired.clear(),
         }
+        self.pick_up(ctx);
 
         let changed = match (plan, &self.source) {
             (Some(p), Some(s)) => !Arc::ptr_eq(p, s),
@@ -349,50 +456,125 @@ impl Preview {
             _ => true,
         };
         if changed {
-            self.source = plan.cloned();
-            if plan.is_none() {
-                self.toolpath = None;
-                self.texture = None;
-                return;
-            }
             // New plan: show every layer and fit the view again.
-            self.visible.clear();
+            self.source = plan.cloned();
+            self.toolpath = None;
+            self.texture = None;
+            self.texture_layers.clear();
+            self.failed = false;
+            self.chips.clear();
+            self.range = (0, 0);
             self.zoom = 1.0;
             self.center = None;
-            self.toolpath = None;
-            self.start_render(ctx);
-        } else if self.rerender && self.job.is_none() {
-            self.start_render(ctx);
+            if let Some(tube) = &mut self.tube {
+                tube.clear_paths();
+            }
+        }
+        self.start_work(ctx);
+    }
+
+    /// Free everything the 3D view has on the GPU (on exit).
+    pub fn free_gpu(&mut self, gl: &glow::Context) {
+        self.retired.drain(..).for_each(|closed| closed.destroy(gl));
+        if let Some(tube) = &self.tube {
+            tube.gl().destroy(gl);
         }
     }
 
-    fn start_render(&mut self, ctx: &egui::Context) {
-        if self.job.is_some() {
-            self.rerender = true;
+    /// Take in what the background thread finished, if it's still wanted.
+    fn pick_up(&mut self, ctx: &egui::Context) {
+        let Some(work) = &self.work else { return };
+        let current = self.source.as_ref().is_some_and(|s| Arc::ptr_eq(s, &work.source));
+        match work.rx.try_recv() {
+            Ok(done) => {
+                self.work = None;
+                if current {
+                    self.accept(ctx, done);
+                }
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.work = None;
+                if current {
+                    self.failed = true;
+                }
+            }
+        }
+    }
+
+    fn accept(&mut self, ctx: &egui::Context, done: Done) {
+        let layers = done.toolpath.layers.len();
+        if self.chips.len() != layers {
+            self.chips = vec![true; layers];
+            self.range = (0, layers.saturating_sub(1));
+        }
+        if let Some((shown, image)) = done.image {
+            self.texture = Some(ctx.load_texture("wind-preview", image, TextureOptions::LINEAR));
+            self.texture_layers = shown;
+        }
+        if let (Some(mesh), Some(tube)) = (done.mesh, &mut self.tube) {
+            tube.set_paths(&done.toolpath, mesh);
+        }
+        self.toolpath = Some(done.toolpath);
+    }
+
+    /// Which layers to draw: chip on, and inside the slider's range.
+    fn shown(&self, layers: usize) -> Vec<bool> {
+        let (lo, hi) = self.range;
+        (0..layers)
+            .map(|i| self.chips.get(i).copied().unwrap_or(true) && lo <= i && i <= hi)
+            .collect()
+    }
+
+    /// Start the background thread on whatever is missing: the toolpath, the
+    /// unwrapped image (2D) or the tow paths (3D). One job at a time; this
+    /// runs every frame, so anything changed meanwhile is caught up on next.
+    fn start_work(&mut self, ctx: &egui::Context) {
+        if self.work.is_some() || self.failed {
             return;
         }
-        self.rerender = false;
-        let Some(lines) = self.source.clone() else { return };
-        let cached = self.toolpath.clone();
-        let visible = self.visible.clone();
+        let Some(source) = self.source.clone() else { return };
+        let toolpath = self.toolpath.clone();
+        // Until the toolpath is known, the image shows every layer.
+        let layers = toolpath.as_ref().map(|tp| self.shown(tp.layers.len()));
+        let want_image = self.tube.is_none()
+            && (self.texture.is_none() || layers.as_ref().is_none_or(|l| *l != self.texture_layers));
+        let want_mesh = self
+            .tube
+            .as_ref()
+            .is_some_and(|tube| !toolpath.as_ref().is_some_and(|tp| tube.has_paths_for(tp)));
+        if toolpath.is_some() && !want_image && !want_mesh {
+            return;
+        }
+
         let max_side = MAX_IMAGE_SIDE.min(ctx.input(|i| i.max_texture_side));
         let (tx, rx) = mpsc::channel();
         let ctx = ctx.clone();
+        let lines = source.clone();
         std::thread::spawn(move || {
-            let tp = cached.unwrap_or_else(|| Arc::new(parse_toolpath(&lines)));
-            let image = render(&tp, &visible, max_side);
-            let _ = tx.send((tp, image));
+            let toolpath = toolpath.unwrap_or_else(|| Arc::new(parse_toolpath(&lines)));
+            let image = want_image.then(|| {
+                let shown: Vec<bool> = (0..toolpath.layers.len())
+                    .map(|i| layers.as_ref().and_then(|l| l.get(i).copied()).unwrap_or(true))
+                    .collect();
+                let image = render(&toolpath, &shown, max_side);
+                (shown, image)
+            });
+            let mesh = want_mesh.then(|| tow_paths::build(&toolpath));
+            let _ = tx.send(Done { toolpath, image, mesh });
             ctx.request_repaint();
         });
-        self.job = Some(RenderJob { rx });
+        self.work = Some(Work { source, rx });
     }
 
-    /// `marker`: where the running job is (carriage mm, mandrel degrees).
-    pub fn ui(&mut self, ui: &mut Ui, stale: bool, marker: Option<(f64, f64)>) {
+    /// `marker`: where a running job is.
+    pub fn ui(&mut self, ui: &mut Ui, stale: bool, marker: Option<JobMarker>) {
         let p = theme::pal(ui.ctx());
         let Some(tp) = self.toolpath.clone() else {
             ui.centered_and_justified(|ui| {
-                if self.source.is_some() {
+                if self.failed {
+                    ui.label(RichText::new("Couldn't draw a preview of this G-code.").color(p.text_dim));
+                } else if self.source.is_some() {
                     ui.horizontal(|ui| {
                         ui.spinner();
                         ui.label("Drawing the preview…");
@@ -408,46 +590,110 @@ impl Preview {
             });
             return;
         };
+        let layers = tp.layers.len();
 
-        // Controls: layer toggles, aspect, fit.
-        let mut visibility_changed = false;
+        self.controls(ui, &tp, &p);
+        if stale {
+            ui.label(
+                RichText::new("⚠ The wind changed since this G-code was generated.")
+                    .color(theme::WARN_AMBER),
+            );
+        }
+
+        // The view, with the layer slider down its right-hand side.
+        let (area, _) =
+            ui.allocate_exact_size(ui.available_size().max(Vec2::new(100.0, 80.0)), Sense::hover());
+        let slider_width = if layers > 1 { layer_slider::WIDTH } else { 0.0 };
+        let view = Rect::from_min_max(area.min, Pos2::new(area.max.x - slider_width, area.max.y));
+        if layers > 1 {
+            self.arrow_keys(ui, area, layers);
+        }
+        let shown = self.shown(layers);
+        let marker = marker.map(|m| tp.real_position(m.x, m.y, m.sent));
+        if let Some(tube) = &mut self.tube {
+            let show = Show { layers: &shown, thin_lines: self.thin_lines, marker };
+            tube.ui(ui, view, &tp, show, &p);
+        } else {
+            self.plot(ui, view, &tp, marker, &p);
+        }
+        if layers > 1 {
+            let slider = Rect::from_min_max(Pos2::new(view.max.x, area.min.y), area.max);
+            if layer_slider::show(ui, slider, &mut self.range, &tp.layers, &self.chips, &p) {
+                ui.ctx().request_repaint();
+            }
+        }
+        self.start_work(ui.ctx());
+    }
+
+    /// Layer chips, the 3D switch and the view's own buttons.
+    fn controls(&mut self, ui: &mut Ui, tp: &Toolpath, p: &Palette) {
+        let layers = tp.layers.len();
+        // Past a handful of layers the chips keep to their numbers.
+        let compact = layers > 6;
+        let (lo, hi) = self.range;
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new("Layers").strong());
             for (i, name) in tp.layers.iter().enumerate() {
                 let color = layer_color(i);
-                let on = self.visible.get(i).copied().unwrap_or(true);
-                let text = if on {
-                    RichText::new(format!("■ {} {name}", i + 1)).color(color)
+                let on = self.chips.get(i).copied().unwrap_or(true);
+                // Off by its chip: struck through. Off by the slider: faded.
+                let in_range = (lo..=hi).contains(&i);
+                let label = if compact {
+                    format!("■ {}", i + 1)
                 } else {
-                    RichText::new(format!("■ {} {name}", i + 1)).color(p.text_dim).strikethrough()
+                    format!("■ {} {name}", i + 1)
+                };
+                let text = match (on, in_range) {
+                    (true, true) => RichText::new(label).color(color),
+                    (true, false) => RichText::new(label).color(color.gamma_multiply(0.45)),
+                    (false, _) => RichText::new(label).color(p.text_dim).strikethrough(),
                 };
                 let chip = egui::Button::new(text)
-                    .fill(if on { p.inset } else { Color32::TRANSPARENT })
-                    .stroke(Stroke::new(1.0, if on { color.gamma_multiply(0.7) } else { p.card_stroke }));
-                if ui.add(chip).on_hover_text("Show or hide this layer").clicked()
-                    && let Some(v) = self.visible.get_mut(i) {
+                    .fill(if on && in_range { p.inset } else { Color32::TRANSPARENT })
+                    .stroke(Stroke::new(1.0, match (on, in_range) {
+                        (true, true) => color.gamma_multiply(0.7),
+                        (true, false) => color.gamma_multiply(0.3),
+                        (false, _) => p.card_stroke,
+                    }));
+                let mut hover = if compact {
+                    format!("Layer {}: {name}. Show or hide it", i + 1)
+                } else {
+                    "Show or hide this layer".to_owned()
+                };
+                if on && !in_range {
+                    hover.push_str(". The layer slider is hiding it for now.");
+                }
+                if ui.add(chip).on_hover_text(hover).clicked()
+                    && let Some(v) = self.chips.get_mut(i) {
                         *v = !*v;
-                        visibility_changed = true;
                     }
             }
-            if ui.small_button("All").clicked() {
-                self.visible.iter_mut().for_each(|v| *v = true);
-                visibility_changed = true;
+            if ui.small_button("All").on_hover_text("Show every layer").clicked() {
+                self.chips.iter_mut().for_each(|v| *v = true);
+                self.range = (0, layers.saturating_sub(1));
             }
             ui.separator();
             let mut in_3d = self.tube.is_some();
             if ui
                 .toggle_value(&mut in_3d, "3D view")
                 .on_hover_text(
-                    "Wrap the preview around a 3D tube. Nothing 3D is drawn until this is on.",
+                    "Draw the tow paths on a 3D tube. Nothing 3D is made until this is on.",
                 )
                 .changed()
             {
-                self.tube = in_3d.then(TubeView::default);
+                if in_3d {
+                    self.tube = Some(TubeView::default());
+                } else if let Some(tube) = self.tube.take() {
+                    self.retired.push(tube.into_gl());
+                }
             }
             if let Some(tube) = &mut self.tube {
+                ui.toggle_value(&mut self.thin_lines, "Thin lines").on_hover_text(
+                    "Draw each pass as a thin line along its middle instead of a tow at its \
+                     true width, so the layers underneath show through",
+                );
                 if ui.small_button("Reset view").on_hover_text("Or double-click the tube").clicked() {
-                    *tube = TubeView::default();
+                    tube.reset_camera();
                 }
             } else {
                 ui.checkbox(&mut self.true_aspect, "True proportions")
@@ -457,29 +703,37 @@ impl Preview {
                     self.center = None;
                 }
             }
-            if self.job.is_some() {
+            if self.work.is_some() {
                 ui.spinner();
             }
         });
-        if visibility_changed {
-            self.start_render(ui.ctx());
-        }
-        if stale {
-            ui.label(
-                RichText::new("⚠ The wind changed since this G-code was generated.")
-                    .color(theme::WARN_AMBER),
-            );
-        }
+    }
 
-        if let Some(tube) = &mut self.tube {
-            let texture = self.texture.as_ref().map(|t| t.id());
-            tube.ui(ui, &tp, texture, marker, &p);
+    /// ↑/↓ move the slider's top handle while the pointer is over the view.
+    fn arrow_keys(&mut self, ui: &mut Ui, area: Rect, layers: usize) {
+        if !ui.rect_contains_pointer(area) || ui.memory(|m| m.focused().is_some()) {
             return;
         }
+        let (up, down) = ui.input_mut(|i| {
+            (
+                i.consume_key(Modifiers::NONE, Key::ArrowUp),
+                i.consume_key(Modifiers::NONE, Key::ArrowDown),
+            )
+        });
+        let (lo, hi) = &mut self.range;
+        if up {
+            *hi = (*hi + 1).min(layers - 1);
+        }
+        if down {
+            *hi = hi.saturating_sub(1).max(*lo);
+        }
+    }
 
+    /// The unwrapped mandrel in `outer`. `marker`: where a running job is
+    /// (mm, degrees).
+    fn plot(&mut self, ui: &mut Ui, outer: Rect, tp: &Toolpath, marker: Option<(f64, f64)>, p: &Palette) {
         // Plot area, leaving room for axis labels.
-        let (outer, response) =
-            ui.allocate_exact_size(ui.available_size().max(Vec2::new(100.0, 80.0)), Sense::click_and_drag());
+        let response = ui.interact(outer, ui.make_persistent_id("unwrapped_plot"), Sense::click_and_drag());
         let left_margin = 44.0;
         let bottom_margin = 34.0;
         let plot = Rect::from_min_max(
@@ -710,5 +964,67 @@ mod tests {
 
         let hidden = render(&tp, &[false], 512);
         assert!(hidden.pixels.iter().all(|c| c.a() == 0));
+    }
+
+    /// The same angle, give or take whole turns.
+    fn same_angle(a: f64, b: f64) -> bool {
+        let d = (a - b).rem_euclid(360.0);
+        d < 1e-6 || d > 360.0 - 1e-6
+    }
+
+    fn first_run(tp: &Toolpath, layer: u16) -> (usize, Run) {
+        let i = tp.runs.iter().position(|r| r.layer == layer).expect("layer has runs");
+        (i, tp.runs[i])
+    }
+
+    /// In mixed.wind, layer 2 starts after a 540° near lock and a G92 Y0, so
+    /// it really starts half a turn round; the 90° skip layer turns the next
+    /// layer a further quarter. G-code coordinates would put both at 0°.
+    #[test]
+    fn layers_sit_where_they_are_wound() {
+        let tp = parse_toolpath(&lines(include_str!("../tests/fixtures/mixed.gcode")));
+
+        // One unbroken path: G92 renames positions, it doesn't move the tow.
+        for w in tp.runs.windows(2) {
+            assert!((w[0].x1 - w[1].x0).abs() < 1e-6 && (w[0].a1 - w[1].a0).abs() < 1e-6, "{w:?}");
+        }
+
+        let (i, lock) = first_run(&tp, 1);
+        assert!(same_angle(lock.a0, 0.0), "{lock:?}");
+        assert!((lock.a1 - lock.a0 - 540.0).abs() < 1e-6 && lock.x0 == lock.x1, "{lock:?}");
+        assert!(same_angle(tp.runs[i + 1].a0, 180.0), "{:?}", tp.runs[i + 1]);
+
+        let (_, next_helical) = first_run(&tp, 2);
+        assert!(same_angle(next_helical.a0, 180.0), "{next_helical:?}");
+
+        let (_, skip) = first_run(&tp, 3);
+        assert!(same_angle(skip.a0, 180.0) && (skip.a1 - skip.a0 - 90.0).abs() < 1e-6, "{skip:?}");
+        let (_, after_skip) = first_run(&tp, 4);
+        assert!(same_angle(after_skip.a0, 270.0), "{after_skip:?}");
+    }
+
+    /// A running job reports G-code coordinates; the G92s sent so far turn
+    /// them into real ones.
+    #[test]
+    fn job_positions_become_real() {
+        let gcode = lines(include_str!("../tests/fixtures/mixed.gcode"));
+        let tp = parse_toolpath(&gcode);
+        assert_eq!(tp.real_position(5.0, 10.0, 0), (5.0, 10.0));
+
+        let layer5 = gcode.iter().position(|l| l.starts_with("; Layer 5 of")).unwrap();
+        let (x, a) = tp.real_position(0.0, 10.0, layer5);
+        assert!(x.abs() < 1e-9 && same_angle(a, 280.0), "{x} {a}");
+        // The skip layer's own G92 Y0 hasn't been sent yet one line earlier.
+        let (_, a) = tp.real_position(0.0, 10.0, layer5 - 1);
+        assert!(same_angle(a, 190.0), "{a}");
+    }
+
+    /// The planner's ~1 mm moves join back into straight runs.
+    #[test]
+    fn moves_join_into_runs() {
+        let gcode = lines(include_str!("../tests/fixtures/helical.gcode"));
+        let tp = parse_toolpath(&gcode);
+        let moves = gcode.iter().filter(|l| l.starts_with("G0 X")).count();
+        assert!(tp.runs.len() * 20 < moves, "{} runs from {moves} moves", tp.runs.len());
     }
 }

@@ -11,7 +11,7 @@ use eframe::egui::{
 use crate::background::Background;
 use crate::designer::{self, Designer};
 use crate::job::{JobEstimate, JobSource};
-use crate::preview::Preview;
+use crate::preview::{JobMarker, Preview};
 use crate::serial::{self, Connection, Event, JobEvent, LogKind, Position};
 use crate::settings::{self, MainTab, Settings};
 use crate::sound::{self, Alert, Preset, Sound};
@@ -94,6 +94,8 @@ struct JobView {
     estimate: Option<Arc<JobEstimate>>,
     /// Lines the board has accepted.
     done: usize,
+    /// Lines sent to the board; `target` follows all of them.
+    sent: usize,
     total: usize,
     /// Where the last move sent is headed.
     target: Option<Position>,
@@ -367,14 +369,16 @@ impl TyphoonApp {
                 self.job.phase = JobPhase::Running;
                 self.job.total = total;
                 self.job.done = 0;
+                self.job.sent = 0;
                 self.job.run_time = Duration::ZERO;
                 self.job.run_started = Some(Instant::now());
                 self.job.outcome = None;
                 let name = self.job.name.clone();
                 self.log(LogKind::Info, format!("Job started: {name}"));
             }
-            JobEvent::Progress { done, position } => {
+            JobEvent::Progress { done, sent, position } => {
                 self.job.done = done;
+                self.job.sent = sent;
                 self.job.target = Some(position);
             }
             JobEvent::Pausing => {
@@ -1121,7 +1125,8 @@ impl TyphoonApp {
                     MainTab::Preview => {
                         // While winding, the preview shows the running job and where it is.
                         let (stale, marker) = if self.job.active() {
-                            (false, self.job.target.map(|t| (t.x, t.y)))
+                            let sent = self.job.sent;
+                            (false, self.job.target.map(|t| JobMarker { x: t.x, y: t.y, sent }))
                         } else {
                             let stale = self.job_source.as_ref().is_some_and(|s| s.from_designer)
                                 && self.designer.is_stale(self.settings.verbose_gcode);
@@ -1701,7 +1706,7 @@ fn jog_row(
 }
 
 impl eframe::App for TyphoonApp {
-    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.handle_serial_events();
         self.designer.poll();
         self.pick_up_generated();
@@ -1711,7 +1716,9 @@ impl eframe::App for TyphoonApp {
         } else {
             self.job_source.as_ref().map(|s| s.lines.clone())
         };
-        self.preview.sync(ctx, lines.as_ref());
+        // The OpenGL context, to free what a closed 3D view left on the GPU.
+        let gl = frame.gl().map(|gl| &**gl);
+        self.preview.sync(ctx, lines.as_ref(), gl);
         if self.job.active() {
             // Keep the elapsed/ETA clock ticking.
             ctx.request_repaint_after(Duration::from_secs(1));
@@ -1805,6 +1812,12 @@ impl eframe::App for TyphoonApp {
         self.settings.wind_json = Some(self.designer.to_json());
         self.settings.last_wind_file = self.designer.path_string();
         self.settings.save(storage);
+    }
+
+    fn on_exit(&mut self, gl: Option<&eframe::glow::Context>) {
+        if let Some(gl) = gl {
+            self.preview.free_gpu(gl);
+        }
     }
 
     fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {

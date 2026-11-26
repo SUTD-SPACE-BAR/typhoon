@@ -292,6 +292,7 @@ impl<R: Fn()> Worker<R> {
             job.last_progress = Instant::now();
             let e = JobEvent::Progress {
                 done: job.done,
+                sent: job.next,
                 position: job.position,
             };
             self.emit(Event::Job(e));

@@ -73,9 +73,9 @@ pub enum LogKind {
 #[derive(Clone, Debug, PartialEq)]
 pub enum JobEvent {
     Started { total: usize },
-    /// `done` lines have been accepted by the board; `position` is where
-    /// the last sent move is headed.
-    Progress { done: usize, position: Position },
+    /// `done` lines have been accepted by the board and `sent` sent to it;
+    /// `position` is where the last sent move is headed.
+    Progress { done: usize, sent: usize, position: Position },
     /// Waiting for buffered moves to finish before calling it paused.
     Pausing,
     Paused,

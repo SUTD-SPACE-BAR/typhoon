@@ -6,12 +6,15 @@ mod app;
 mod background;
 mod designer;
 mod job;
+mod layer_slider;
 mod planner;
 mod preview;
 mod serial;
 mod settings;
 mod sound;
 mod theme;
+mod tow_gl;
+mod tow_paths;
 mod tube3d;
 
 use eframe::egui;
