@@ -14,7 +14,7 @@ produces the same G-code, line for line. Licensed under GPL-3.0.
 
 | Preview (unrolled mandrel) | Preview (3D view) |
 |---|---|
-| ![Toolpath preview of the mandrel surface unrolled flat](docs/screenshots/preview-light.png) | ![The same wind wrapped around a 3D tube](docs/screenshots/preview-3d-dark.png) |
+| ![Toolpath preview of the mandrel surface unrolled flat](docs/screenshots/preview-light.png) | ![The same wind's tow paths on a 3D tube, zoomed in on the helical crossings](docs/screenshots/preview-3d-dark.png) |
 
 ## What it does
 
@@ -22,9 +22,14 @@ produces the same G-code, line for line. Licensed under GPL-3.0.
   saves cyclone `.wind` files; flags pattern numbers that don't divide the
   circuit count and other mistakes; estimates time and tow length.
 - **Preview**: the mandrel surface unrolled flat, tows at true width and angle,
-  layer by layer, with a live marker while winding. An optional **3D view**
-  wraps it around the tube (drag to turn, scroll to zoom); it's only drawn while
-  switched on, and only redrawn while you move it, so old laptops cope.
+  with a live marker while winding. An optional **3D view** draws the tow paths
+  themselves on the tube, every pass a ribbon at true width like a slicer's
+  preview (drag to turn, scroll to zoom; **Thin lines** shows the layers
+  through each other). A slider beside either view picks the range of layers
+  shown, and each layer sits at the angle it's really wound at, even though
+  cyclone re-zeroes the mandrel between layers. The 3D paths are built once
+  and drawn by the GPU, and nothing 3D exists until it's switched on, so old
+  laptops cope.
 - **Machine control**: COM port picker (USB ports first), console with history,
   jog, Home X / Home Z, set mandrel zero, motors off, E-STOP.
 - **Jobs**: start checklist, pause/resume, stop, speed override, progress and ETA.
@@ -81,6 +86,9 @@ strangely, `ModemManager` may be probing the port:
   is installed.
 - File dialogs use the desktop portal (`xdg-desktop-portal`, present on normal
   desktop installs).
+- The 3D preview draws with OpenGL (3.3, ES 2.0 or an older compatibility
+  profile, whichever the driver offers). If the driver can't run it, the view
+  shows why instead.
 - During a job, Typhoon asks systemd (`systemd-inhibit`) to keep the machine
   from sleeping. Closing the lid can still suspend it depending on your power
   settings, so keep the lid open.
